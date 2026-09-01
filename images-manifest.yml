@@ -1,0 +1,11 @@
+version: 1.0.0
+
+images:
+  - name: metrics-aggregator
+    docker_file: docker/Dockerfile
+    docker_image: qa/metrics-aggregator
+    public_image: ce/metrics-aggregator
+    platforms: linux/amd64, linux/arm64
+    public: true
+    snyk_check: true
+    target: null

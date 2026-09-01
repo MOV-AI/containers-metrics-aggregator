@@ -1,0 +1,76 @@
+---
+# =============================================================================
+# LOCAL DEVELOPMENT ONLY - do not use as a deployment reference.
+# Brings up the metrics path end to end: telegraf -> metrics-aggregator
+# (Mimir) -> obs-dashboard (Grafana), i.e. the path that replaces
+# telegraf -> influxdb -> monitoring.
+#   docker compose -f tests/docker-compose.yml up --build
+#   Grafana:  http://localhost:3000   (anonymous viewer)
+#   Mimir:    http://localhost:8080/ready
+# =============================================================================
+name: metrics-test
+
+x-movai-common: &movai-common
+  restart: unless-stopped
+  logging: &movai-common-logging
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  metrics-aggregator:
+    <<: *movai-common
+    build:
+      context: ../
+      dockerfile: docker/Dockerfile
+    container_name: metrics-aggregator
+    hostname: metrics-aggregator
+    labels:
+      service: metrics-aggregator
+      robot: metrics-test
+    environment:
+      MIMIR_LOG_LEVEL: info
+      # Short retention so the compaction/deletion path is observable locally.
+      MIMIR_RETENTION_PERIOD: 24h
+      MIMIR_COMPACTOR_DELETION_DELAY: 0s
+    ports:
+      - "8080:8080"
+    volumes:
+      - mimir-data:/mimir
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+
+  telegraf:
+    <<: *movai-common
+    image: ${MOVAI_REGISTRY:-registry.cloud.mov.ai}/ce/telegraf:latest
+    container_name: telegraf
+    labels:
+      service: telegraf
+      robot: metrics-test
+    volumes:
+      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+    depends_on:
+      metrics-aggregator:
+        condition: service_healthy
+
+  obs-dashboard:
+    <<: *movai-common
+    image: ${MOVAI_REGISTRY:-registry.cloud.mov.ai}/ce/obs-dashboard:latest
+    container_name: obs-dashboard
+    labels:
+      service: obs-dashboard
+      robot: metrics-test
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/datasources/mimir.yml:/etc/grafana/provisioning/datasources/mimir.yml:ro
+    depends_on:
+      metrics-aggregator:
+        condition: service_healthy
+
+volumes:
+  mimir-data:

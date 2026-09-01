@@ -1,0 +1,10 @@
+# Local tooling / build artifacts. Neither sibling repo has a .gitignore,
+# which is why untracked .tox/ and .vscode/ noise sits in their working trees.
+.tox/
+.vscode/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local test data produced by tests/docker-compose.yml
+tests/mimir_data/

@@ -1,0 +1,16 @@
+---
+# Mimir speaks the Prometheus query API, under api.prometheus_http_prefix
+# (default /prometheus). This is the follow-up change that belongs in
+# containers-obs-dashboard alongside its existing loki.yml.
+apiVersion: 1
+
+datasources:
+  - name: Mimir
+    type: prometheus
+    access: proxy
+    url: http://metrics-aggregator:8080/prometheus
+    isDefault: false
+    editable: true
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST

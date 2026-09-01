@@ -1,0 +1,328 @@
+---
+# =============================================================================
+# MOV.AI Metrics Aggregator - Grafana Mimir, monolithic (single-binary) mode
+# =============================================================================
+# This file is expanded by Mimir itself via -config.expand-env=true. There is
+# no entrypoint script, no envsubst and no templating step, matching the
+# containers-log-aggregator pattern.
+#
+# !!! SYNTAX WARNING - READ BEFORE EDITING !!!
+# Mimir's expander is Go's os.Expand plus a short default helper in
+# cmd/mimir/main.go. The default form takes ONE COLON:
+#       correct:  ${MIMIR_X:336h}
+#       WRONG:    ${MIMIR_X:-336h}   expands to the literal "-336h"
+# The sibling containers-log-aggregator repo uses Loki, which expands via
+# drone/envsubst and does accept the bash-like ":-" form. Mimir does not.
+# A stray hyphen makes durations and rates negative, and Mimir will start
+# happily with a negative ingestion rate while dropping every sample.
+# Never copy placeholders between the two config files.
+#
+# Further expander rules:
+#   - Expansion is textual over the whole file, comments included. Never write
+#     a dollar sign outside a well-formed placeholder, not even in a comment:
+#     os.Expand consumes it and mangles what follows.
+#   - An env var set to the empty string is treated as unset, so a defaulted
+#     field cannot be overridden back to empty. Fields where empty is the
+#     correct inert value therefore use the no-default "${VAR}" form.
+#   - Unknown or misspelled keys are fatal: Mimir decodes with
+#     KnownFields(true). There is no lenient mode.
+#
+# Validate any edit without starting the service:
+#   docker run --rm -v "./files/mimir-config.yml:/etc/mimir/mimir-config.yml:ro" \
+#     grafana/mimir:3.2.0 -config.file=/etc/mimir/mimir-config.yml \
+#     -config.expand-env=true -modules
+# -modules runs the full parse and Config.Validate(), including the filesystem
+# path overlap and bucket checks, then exits before any server starts.
+# =============================================================================
+
+# Monolithic. "all" resolves to query-frontend, query-scheduler, querier,
+# ingester, distributor, store-gateway, ruler and compactor in one process.
+# target is a config-file field, so the role is changeable by environment
+# alone and the Dockerfile CMD never has to change. Note that alertmanager is
+# NOT part of "all" - use MIMIR_TARGET=all,alertmanager to add it.
+target: "${MIMIR_TARGET:all}"
+
+# Single tenant. With multitenancy disabled Mimir stops requiring an
+# X-Scope-OrgID header and attributes everything to no_auth_tenant, so all
+# three ingest paths and the query API work with no headers at all. That is
+# what makes the zero-configuration start possible.
+multitenancy_enabled: ${MIMIR_MULTITENANCY_ENABLED:false}
+no_auth_tenant: "${MIMIR_NO_AUTH_TENANT:anonymous}"
+
+# No phone-home. Upstream defaults this to true; this is the Mimir analogue of
+# Loki's analytics.reporting_enabled: false in the sibling repo. Deliberately
+# not env-tunable - a robot fleet must not call out to grafana.com.
+usage_stats:
+  enabled: false
+
+server:
+  # One HTTP port carries everything: all three ingest paths, the PromQL API
+  # under /prometheus, plus /ready and /metrics at the root.
+  http_listen_port: ${MIMIR_HTTP_PORT:8080}
+  # Internal component mesh. In monolithic mode Mimir wires
+  # querier -> scheduler -> frontend over 127.0.0.1 on this port itself, so it
+  # never needs to be published.
+  grpc_listen_port: ${MIMIR_GRPC_PORT:9095}
+  # warn rather than upstream's info: Mimir logs every ring update, block ship
+  # and compaction at info level, which is constant flash writes on a robot
+  # for no operational value. Set MIMIR_LOG_LEVEL=info when debugging.
+  log_level: "${MIMIR_LOG_LEVEL:warn}"
+  # Set MIMIR_LOG_FORMAT=json to have the log-agent parse these structurally.
+  log_format: "${MIMIR_LOG_FORMAT:logfmt}"
+  # Upstream 30s. Raised because pushes from a robot arrive over links that
+  # are slow or flapping.
+  http_server_read_timeout: 2m
+
+# Upstream default is ./metrics-activity.log, which resolves to / in this
+# image and breaks on a read-only root filesystem. Pinned under the volume.
+activity_tracker:
+  filepath: /mimir/metrics-activity.log
+
+# -----------------------------------------------------------------------------
+# Storage
+# -----------------------------------------------------------------------------
+# common.storage is inherited by blocks_storage, ruler_storage and
+# alertmanager_storage, so one switch moves all of them. Both the filesystem
+# and the s3 block are always present: the s3 fields use the no-default form
+# so they expand to empty strings and stay completely inert while the backend
+# is filesystem, because only the ACTIVE backend is validated.
+common:
+  storage:
+    backend: "${MIMIR_STORAGE_BACKEND:filesystem}"
+    filesystem:
+      dir: /mimir/data
+    s3:
+      # For MinIO use host:port with no scheme and set MIMIR_S3_INSECURE=true.
+      endpoint: "${MIMIR_S3_ENDPOINT}"
+      region: "${MIMIR_S3_REGION}"
+      bucket_name: "${MIMIR_S3_BUCKET}"
+      access_key_id: "${MIMIR_S3_ACCESS_KEY_ID}"
+      # A flagext.Secret, so it is redacted as ******** on /config.
+      secret_access_key: "${MIMIR_S3_SECRET_ACCESS_KEY}"
+      insecure: ${MIMIR_S3_INSECURE:false}
+
+blocks_storage:
+  # MANDATORY - do not remove, Mimir refuses to start without it.
+  # Blocks and ruler storage both inherit common.storage.filesystem.dir, and
+  # startup validation compares dir+storage_prefix for blocks against
+  # dir+"rules" for the ruler. With an empty prefix those become /mimir/data
+  # and /mimir/data/rules; one is a subdirectory of the other and Mimir aborts
+  # with "cannot overlap with the configured ruler storage filesystem
+  # directory". The same rule applies on S3, where blocks and ruler storage
+  # may not share both a bucket and a prefix.
+  storage_prefix: blocks
+
+  tsdb:
+    # Write-ahead log and the in-memory head. Hot path.
+    dir: /mimir/tsdb
+    # NOT env-tunable on purpose: upstream requires this to exceed both the 2h
+    # block range and querier.query_store_after (12h). Lowering it alone opens
+    # a query gap where data is in neither the ingester nor the store-gateway.
+    # 13h is both the upstream default and the coupled minimum.
+    retention_period: 13h
+    # Upstream false. A snappy-compressed WAL roughly halves bytes written,
+    # which matters on eMMC and SD cards, at a small CPU cost.
+    wal_compression_enabled: ${MIMIR_TSDB_WAL_COMPRESSION:true}
+    # Upstream 1h. Compacting an idle head sooner releases memory sooner,
+    # which is the common case on a robot that is parked or power-cycled.
+    head_compaction_idle_timeout: 30m
+    # Upstream 350MiB, a fifth of a 2GB host, for an LRU that only grows under
+    # query sharding. 32MiB is ample at edge-scale series counts.
+    series_hash_cache_max_size_bytes: 33554432
+
+  bucket_store:
+    # The store-gateway's local mirror of block index headers.
+    sync_dir: /mimir/tsdb-sync
+    # Upstream 200. Bounds concurrent long-term-storage queries, and so peak
+    # query memory, on a 1-2 core host.
+    max_concurrent: ${MIMIR_BUCKET_STORE_MAX_CONCURRENT:20}
+    # Upstream 1GiB. Same reasoning as the tsdb cache above, more so.
+    series_hash_cache_max_size_bytes: 67108864
+
+# Distinct prefixes so blocks, rules and alerts can share one filesystem
+# directory or one bucket without tripping the overlap checks.
+# alertmanager_storage is set for future-proofing only: alertmanager is not
+# part of target=all, so it is unused until MIMIR_TARGET adds it.
+ruler_storage:
+  storage_prefix: ruler
+
+alertmanager_storage:
+  storage_prefix: alertmanager
+
+# -----------------------------------------------------------------------------
+# Ingest paths
+# -----------------------------------------------------------------------------
+distributor:
+  # Influx line protocol on POST /api/v1/push/influx/write. This is the
+  # drop-in replacement path for InfluxDB, which telegraf already speaks.
+  # Upstream defaults it to false, and this field plus max_influx_request_size
+  # are marked hidden so they do not appear in the generated config reference -
+  # they are read from the struct tags in pkg/distributor/distributor.go.
+  # Experimental upstream, load-bearing here.
+  # Prometheus remote-write (POST /api/v1/push) and OTLP
+  # (POST /otlp/v1/metrics) are registered unconditionally - no flag exists.
+  influx_endpoint_enabled: ${MIMIR_INFLUX_ENDPOINT_ENABLED:true}
+
+  # Upstream sets all three of these to 100MiB. One 100MiB push decoded in
+  # memory will OOM a 2GB host. 16MiB is far beyond a default telegraf batch
+  # and still generous for remote-write.
+  max_influx_request_size: ${MIMIR_MAX_INFLUX_REQUEST_SIZE:16777216}
+  max_otlp_request_size: ${MIMIR_MAX_OTLP_REQUEST_SIZE:16777216}
+  max_recv_msg_size: ${MIMIR_MAX_REMOTE_WRITE_REQUEST_SIZE:16777216}
+
+  # Upstream pre-allocates 2000 push workers. On a single-ingester deployment
+  # a hundred is more than enough and saves the goroutine stacks.
+  reusable_ingester_push_workers: 100
+
+  ring:
+    kvstore:
+      store: "${MIMIR_RING_STORE:inmemory}"
+
+# -----------------------------------------------------------------------------
+# Rings
+# -----------------------------------------------------------------------------
+# Every ring defaults to memberlist upstream. inmemory is chosen for the
+# single-binary edge deployment because with target=all every ring client
+# lives in one process, so an in-process KV is trivially consistent and needs
+# no network: no gossip listener to open on a robot, no gossip timers burning
+# CPU, no risk of two robots on the same LAN gossiping into one ring, and
+# immediate startup with no stale ingester entries surviving a reboot. The
+# memberlist KV service is constructed lazily, so with inmemory everywhere the
+# gossip transport is never created and port 7946 is never bound.
+# Set MIMIR_RING_STORE=memberlist plus MIMIR_MEMBERLIST_JOIN_MEMBERS to run
+# more than one replica - inmemory rings cannot be shared between processes.
+ingester:
+  ring:
+    kvstore:
+      store: "${MIMIR_RING_STORE:inmemory}"
+    replication_factor: ${MIMIR_REPLICATION_FACTOR:1}
+    # Upstream 15s. That delay exists to pace Kubernetes rolling updates; on a
+    # single node it is 15 wasted seconds before /ready turns green.
+    min_ready_duration: 0s
+  instance_limits:
+    # Upstream 30000. Each in-flight push holds its decoded write request in
+    # memory, so 30k is unbounded growth on an edge host.
+    max_inflight_push_requests: 500
+
+querier:
+  # Upstream 8. Each worker is one concurrent query.
+  max_concurrent: ${MIMIR_QUERIER_MAX_CONCURRENT:4}
+  ring:
+    kvstore:
+      store: "${MIMIR_RING_STORE:inmemory}"
+
+store_gateway:
+  sharding_ring:
+    kvstore:
+      store: "${MIMIR_RING_STORE:inmemory}"
+    # Must match the ingester factor - the querier reads this to decide how
+    # many store-gateways to fan a block query out to.
+    replication_factor: ${MIMIR_REPLICATION_FACTOR:1}
+
+# -----------------------------------------------------------------------------
+# Compactor - owns retention
+# -----------------------------------------------------------------------------
+compactor:
+  data_dir: /mimir/compactor
+  compaction_interval: "${MIMIR_COMPACTION_INTERVAL:1h}"
+  # Upstream 12h. Time between retention marking a block for deletion and the
+  # block actually being removed. Shortened so disk is reclaimed the same
+  # shift. Effective on-disk retention is MIMIR_RETENTION_PERIOD plus this.
+  deletion_delay: "${MIMIR_COMPACTOR_DELETION_DELAY:2h}"
+  sharding_ring:
+    kvstore:
+      store: "${MIMIR_RING_STORE:inmemory}"
+
+# -----------------------------------------------------------------------------
+# Ruler
+# -----------------------------------------------------------------------------
+# The ruler is part of target=all whether or not any rules exist. rule_path is
+# scratch space for rule files the Prometheus managers load; it does not need
+# to survive a restart, but must not overlap any other configured path.
+ruler:
+  rule_path: /mimir/ruler-tmp
+  ring:
+    kvstore:
+      store: "${MIMIR_RING_STORE:inmemory}"
+
+# -----------------------------------------------------------------------------
+# Per-tenant limits
+# -----------------------------------------------------------------------------
+# Defaults for all tenants. To change these without a restart, mount a runtime
+# config file and point MIMIR_RUNTIME_CONFIG_FILE at it.
+limits:
+  # THE retention knob, and the closest analogue to Loki's
+  # limits_config.retention_period in the sibling repo. Blocks whose samples
+  # are older than this are deleted by the compactor, and the query-frontend
+  # clamps queries to the same window. 336h is 14 days. Rough sizing: about
+  # 2 bytes per sample, so 5000 series at 15s is roughly 57MB/day, i.e. about
+  # 800MB for 14 days, plus up to 13h of unshipped local blocks in /mimir/tsdb.
+  compactor_blocks_retention_period: "${MIMIR_RETENTION_PERIOD:336h}"
+
+  # Samples per second, and burst in samples. 10000/s sustained is roughly
+  # 150000 series scraped every 15s, well above a single robot.
+  ingestion_rate: ${MIMIR_INGESTION_RATE:10000}
+  ingestion_burst_size: ${MIMIR_INGESTION_BURST_SIZE:200000}
+
+  # In-memory series ceiling, and the main guard against a cardinality
+  # explosion eating the host. Influx tags become Prometheus labels, so one
+  # badly chosen telegraf tag - a PID, a UUID, a timestamp - multiplies series
+  # without bound. This is the same trap the log-agent's fluent-bit configs
+  # warn about for Loki labels. Budget roughly 2-3KB of ingester memory per
+  # active series.
+  max_global_series_per_user: ${MIMIR_MAX_GLOBAL_SERIES_PER_USER:100000}
+
+  # Influx tags all become labels, and every Influx-ingested series also gets
+  # an extra "__proxy_source__" label, so a measurement carrying 29 tags
+  # already reaches this ceiling.
+  max_label_names_per_series: ${MIMIR_MAX_LABEL_NAMES_PER_SERIES:30}
+
+  # Upstream 0, meaning out-of-order samples are rejected outright. That would
+  # break the telegraf drop-in: telegraf buffers while disconnected and
+  # replays old points on reconnect, and every one of them would be dropped.
+  # A window costs extra ingester memory proportional to the out-of-order
+  # rate, which is why it is a window rather than unlimited.
+  out_of_order_time_window: "${MIMIR_OUT_OF_ORDER_TIME_WINDOW:10m}"
+
+  # How far into the future a timestamp may be before rejection. Robots with
+  # drifting clocks and no NTP need the headroom.
+  creation_grace_period: "${MIMIR_CREATION_GRACE_PERIOD:10m}"
+
+  # Native histograms are memory-hungry; set false if nothing produces them.
+  native_histograms_ingestion_enabled: ${MIMIR_NATIVE_HISTOGRAMS_ENABLED:true}
+  # Set true to give OTLP metric names the Prometheus _seconds/_bytes unit
+  # suffixes. Left false so OTLP names stay as emitted.
+  otel_metric_suffixes_enabled: ${MIMIR_OTEL_METRIC_SUFFIXES_ENABLED:false}
+
+  # Query fan-out. Upstream's 16 shards and 14 parallel subqueries are tuned
+  # for a cloud querier pool; on 1-2 cores that fan-out only adds memory and
+  # contention.
+  query_sharding_total_shards: ${MIMIR_QUERY_SHARDING_TOTAL_SHARDS:4}
+  max_query_parallelism: ${MIMIR_MAX_QUERY_PARALLELISM:4}
+  # Upstream 2000000. The single most effective guard against one careless
+  # Grafana panel taking the container out of memory.
+  max_fetched_chunks_per_query: ${MIMIR_MAX_FETCHED_CHUNKS_PER_QUERY:500000}
+
+# -----------------------------------------------------------------------------
+# Memberlist - inert unless MIMIR_RING_STORE=memberlist
+# -----------------------------------------------------------------------------
+# join_members is a list, which a scalar env var normally cannot supply. The
+# inline flow-sequence form works here: unset expands to [], meaning no peers
+# and a single-node cluster, while
+# MIMIR_MEMBERLIST_JOIN_MEMBERS=host-a,host-b expands to [host-a,host-b].
+# Do not reuse this trick on a list whose default is meaningful, such as
+# blocks_storage.tsdb.block_ranges_period, because [] would replace the real
+# default with nothing.
+memberlist:
+  bind_port: ${MIMIR_MEMBERLIST_PORT:7946}
+  advertise_port: ${MIMIR_MEMBERLIST_PORT:7946}
+  join_members: [${MIMIR_MEMBERLIST_JOIN_MEMBERS:}]
+
+# -----------------------------------------------------------------------------
+# Optional runtime overrides
+# -----------------------------------------------------------------------------
+# Comma-separated YAML files or URLs, re-read periodically. This is the escape
+# hatch for everything env expansion cannot express - per-tenant limits and
+# map-valued settings - and it applies without a restart. Empty disables it.
+runtime_config:
+  file: "${MIMIR_RUNTIME_CONFIG_FILE}"
