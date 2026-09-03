@@ -65,25 +65,26 @@ services:
       service: obs-dashboard
       robot: metrics-test
     environment:
-      # The obs-dashboard image bakes "root_url = /dashboards/" into
-      # grafana.ini, for serving behind the fleet's haproxy. It does NOT set
-      # serve_from_sub_path, so Grafana only *generates* /dashboards/-prefixed
-      # URLs while still serving at /. Hit http://localhost:3000/ directly and
-      # you get an infinite 302 loop to /dashboards/login with an
-      # exponentially nesting redirectTo parameter. Overriding root_url here
-      # makes GET / return 200 with no redirect at all.
-      # (Alternative, if you want to keep the /dashboards/ prefix locally:
-      #  drop this line and set GF_SERVER_SERVE_FROM_SUB_PATH=true instead,
-      #  then browse to http://localhost:3000/dashboards/.)
-      GF_SERVER_ROOT_URL: http://localhost:3000/
-      # The image's grafana.ini also uses "[auth] anonymous_enabled", which is
-      # not a real Grafana setting - the correct section is [auth.anonymous]
-      # with "enabled". So anonymous access is off in the image, and because
-      # security.disable_login_form is true you get a login page with no login
-      # form. These two vars set it correctly (verified: /api/search returns
-      # 200 with them, 401 without).
+      # Released ce/obs-dashboard images up to 1.0.2 ship a grafana.ini using
+      # "[auth] anonymous_enabled", which is not a real Grafana setting - the
+      # correct section is [auth.anonymous] with "enabled". Grafana silently
+      # ignores unknown ini keys, so anonymous access is off, and because
+      # security.disable_login_form is also true the result is a login page
+      # with no login form. Every request then bounces through
+      # /dashboards/login (the image sets root_url = /dashboards/ for haproxy),
+      # which with nothing routing that prefix becomes an infinite 302 loop.
+      # These two vars set it correctly: verified /api/search returns 200 with
+      # them and 401 without.
+      # Fixed upstream in containers-obs-dashboard (fix/anonymous-auth-section);
+      # drop these once a release carrying that fix is pinned below.
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # Cosmetic only, and safe to remove: with anonymous access working,
+      # Grafana serves both / and /dashboards/ correctly without this. It just
+      # keeps local URLs unprefixed. Do NOT reach for
+      # GF_SERVER_SERVE_FROM_SUB_PATH instead - haproxy strips the prefix in
+      # production, so that would break the real deployment.
+      GF_SERVER_ROOT_URL: http://localhost:3000/
     ports:
       - "3000:3000"
     volumes:
