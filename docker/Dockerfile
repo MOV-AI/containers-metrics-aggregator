@@ -6,7 +6,7 @@
 # copied binary could not exec. -uclibc is fully statically linked and
 # publishes amd64, arm64 and arm/v7. (The sibling containers-log-aggregator
 # gets away with the bare tag only because grafana/loki is Alpine-based.)
-FROM busybox:1.37.0-uclibc AS busybox_builder
+FROM busybox:1.38.0-uclibc AS busybox_builder
 
 # Main image
 FROM grafana/mimir:3.2.0 AS base
