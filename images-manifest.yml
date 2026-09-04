@@ -1,10 +1,10 @@
 version: 1.0.2
 
 images:
-  - name: metrics-aggregator
+  - name: metrics-store
     docker_file: docker/Dockerfile
-    docker_image: qa/metrics-aggregator
-    public_image: ce/metrics-aggregator
+    docker_image: qa/metrics-store
+    public_image: ce/metrics-store
     platforms: linux/amd64, linux/arm64
     public: true
     snyk_check: true

@@ -15,12 +15,12 @@ FROM grafana/mimir:3.2.0 AS base
 COPY --from=busybox_builder /bin/busybox /bin/busybox
 
 # Labels
-LABEL description="MOV.AI Metrics Aggregator - Grafana Mimir based metrics store and query engine" \
+LABEL description="MOV.AI Metrics Store - Grafana Mimir based metrics store and query engine" \
       maintainer="devops@mov.ai" \
-      org.opencontainers.image.source="https://github.com/MOV-AI/containers-metrics-aggregator" \
-      org.opencontainers.image.documentation="https://github.com/MOV-AI/containers-metrics-aggregator/blob/main/README.md" \
+      org.opencontainers.image.source="https://github.com/MOV-AI/containers-metrics-store" \
+      org.opencontainers.image.documentation="https://github.com/MOV-AI/containers-metrics-store/blob/main/README.md" \
       org.opencontainers.image.vendor="MOV.AI" \
-      org.opencontainers.image.title="MOV.AI Metrics Aggregator"
+      org.opencontainers.image.title="MOV.AI Metrics Store"
 
 # Configuration Files: YAML Format
 # - mimir-config.yml: Configuration for Grafana Mimir with environment variable
