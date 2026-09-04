@@ -1,6 +1,6 @@
 ---
 # =============================================================================
-# MOV.AI Metrics Aggregator - Grafana Mimir, monolithic (single-binary) mode
+# MOV.AI Metrics Store - Grafana Mimir, monolithic (single-binary) mode
 # =============================================================================
 # This file is expanded by Mimir itself via -config.expand-env=true. There is
 # no entrypoint script, no envsubst and no templating step, matching the

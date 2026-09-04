@@ -8,7 +8,7 @@ datasources:
   - name: Mimir
     type: prometheus
     access: proxy
-    url: http://metrics-aggregator:8080/prometheus
+    url: http://metrics-store:8080/prometheus
     isDefault: false
     editable: true
     jsonData:

@@ -1,4 +1,4 @@
-# MOV.AI Metrics Aggregator
+# MOV.AI Metrics Store
 
 A containerized metrics store and query engine based on
 [Grafana Mimir](https://grafana.com/oss/mimir/), providing centralized metrics
@@ -40,7 +40,7 @@ defaults, starts with zero configuration, and exposes its useful settings as
   ┌──────────┐   Influx line protocol   ┌──────────────────────┐
   │ telegraf │ ───────────────────────► │                      │
   └──────────┘                          │                      │
-  ┌──────────┐   Prometheus remote-write│  metrics-aggregator  │   PromQL   ┌───────────────┐
+  ┌──────────┐   Prometheus remote-write│  metrics-store       │   PromQL   ┌───────────────┐
   │ exporters│ ───────────────────────► │       (Mimir)        │ ◄───────── │ obs-dashboard │
   └──────────┘                          │                      │            │   (Grafana)   │
   ┌──────────┐   OTLP                   │  distributor         │            └───────────────┘
@@ -66,8 +66,8 @@ to a local volume by default, or to object storage when
 |---|---|
 | **Base Image** | `grafana/mimir:3.2.0` (on `gcr.io/distroless/static-debian13`) |
 | **Platforms** | `linux/amd64`, `linux/arm64` |
-| **Registry Image** | `registry.cloud.mov.ai/qa/metrics-aggregator` |
-| **Public Image** | `pubregistry.aws.cloud.mov.ai/ce/metrics-aggregator`, `ghcr.io/mov-ai/ce/metrics-aggregator` |
+| **Registry Image** | `registry.cloud.mov.ai/qa/metrics-store` |
+| **Public Image** | `pubregistry.aws.cloud.mov.ai/ce/metrics-store`, `ghcr.io/mov-ai/ce/metrics-store` |
 | **Data volume** | `/mimir` |
 
 > `grafana/mimir` publishes no `linux/arm/v7` image, so unlike the log-agent and
@@ -108,10 +108,10 @@ entrypoint script and no templating step.
 
 ```yaml
 services:
-  metrics-aggregator:
-    image: registry.cloud.mov.ai/qa/metrics-aggregator:latest
-    container_name: metrics-aggregator
-    hostname: metrics-aggregator
+  metrics-store:
+    image: registry.cloud.mov.ai/qa/metrics-store:latest
+    container_name: metrics-store
+    hostname: metrics-store
     restart: unless-stopped
     environment:
       MIMIR_RETENTION_PERIOD: 336h
@@ -240,11 +240,11 @@ prefix (`blocks/`, `ruler/`, `alertmanager/`), so one bucket serves all three.
 ### Docker Run
 
 ```bash
-docker run -d --name metrics-aggregator \
+docker run -d --name metrics-store \
   -p 8080:8080 \
   -v mimir-data:/mimir \
   -e MIMIR_RETENTION_PERIOD=336h \
-  registry.cloud.mov.ai/qa/metrics-aggregator:latest
+  registry.cloud.mov.ai/qa/metrics-store:latest
 ```
 
 ### Kubernetes
@@ -253,21 +253,21 @@ docker run -d --name metrics-aggregator \
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: metrics-aggregator
+  name: metrics-store
 spec:
-  serviceName: metrics-aggregator
+  serviceName: metrics-store
   replicas: 1
   selector:
     matchLabels:
-      app: metrics-aggregator
+      app: metrics-store
   template:
     metadata:
       labels:
-        app: metrics-aggregator
+        app: metrics-store
     spec:
       containers:
-        - name: metrics-aggregator
-          image: registry.cloud.mov.ai/qa/metrics-aggregator:latest
+        - name: metrics-store
+          image: registry.cloud.mov.ai/qa/metrics-store:latest
           ports:
             - containerPort: 8080
               name: http
@@ -327,7 +327,7 @@ With multitenancy disabled, no `X-Scope-OrgID` header is needed on any path.
 ### Query
 
 The PromQL API lives under the `/prometheus` prefix, so the Grafana datasource
-URL is `http://metrics-aggregator:8080/prometheus`.
+URL is `http://metrics-store:8080/prometheus`.
 
 | Endpoint | Purpose |
 |---|---|
@@ -420,7 +420,7 @@ environment:
 
 ### Container exits immediately with a config error
 
-**Debug:** `docker logs metrics-aggregator`
+**Debug:** `docker logs metrics-store`
 
 **Solutions:** Mimir rejects unknown config keys, so a typo is fatal. Validate
 without starting anything:
@@ -470,7 +470,7 @@ The healthcheck URL is baked in at build time and cannot interpolate
 ## File Structure
 
 ```
-containers-metrics-aggregator/
+containers-metrics-store/
 ├── docker/
 │   └── Dockerfile                    # busybox stage + grafana/mimir, ENV defaults, healthcheck
 ├── files/
@@ -494,7 +494,7 @@ containers-metrics-aggregator/
 ## Building
 
 ```bash
-docker build -t registry.cloud.mov.ai/qa/metrics-aggregator:latest \
+docker build -t registry.cloud.mov.ai/qa/metrics-store:latest \
   -f docker/Dockerfile .
 ```
 
@@ -502,7 +502,7 @@ Multi-platform:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t registry.cloud.mov.ai/qa/metrics-aggregator:latest \
+  -t registry.cloud.mov.ai/qa/metrics-store:latest \
   -f docker/Dockerfile .
 ```
 
@@ -514,7 +514,7 @@ python3 tests/check_env_defaults.py # ENV/YAML drift check
 ```
 
 CI is the shared `MOV-AI/.github` docker workflow. A PR into `main` runs
-hadolint and builds to `registry.cloud.mov.ai/ci/metrics-aggregator`; a merge
+hadolint and builds to `registry.cloud.mov.ai/ci/metrics-store`; a merge
 to `main` bumps the patch version, scans with Snyk, publishes to `qa/`, `ce/`
 and `ghcr.io/mov-ai/ce/`, tags `v<version>` and creates a GitHub release.
 
@@ -540,14 +540,14 @@ and `ghcr.io/mov-ai/ce/`, tags `v<version>` and creates a GitHub release.
 Hardened run:
 
 ```bash
-docker run -d --name metrics-aggregator \
+docker run -d --name metrics-store \
   --read-only \
   --tmpfs /tmp \
   --security-opt no-new-privileges \
   --cap-drop ALL \
   -v mimir-data:/mimir \
   -p 127.0.0.1:8080:8080 \
-  registry.cloud.mov.ai/qa/metrics-aggregator:latest
+  registry.cloud.mov.ai/qa/metrics-store:latest
 ```
 
 ## Migrating from InfluxDB
@@ -560,7 +560,7 @@ Chronograf-based `containers-monitoring`).
 
    ```toml
    [[outputs.influxdb]]
-     urls = ["http://metrics-aggregator:8080/api/v1/push/influx"]
+     urls = ["http://metrics-store:8080/api/v1/push/influx"]
      skip_database_creation = true
    ```
 
@@ -586,7 +586,7 @@ Chronograf-based `containers-monitoring`).
 
 6. **Add the datasource** to `containers-obs-dashboard`
    (`tests/grafana/datasources/mimir.yml` here is the file to copy), pointing at
-   `http://metrics-aggregator:8080/prometheus`.
+   `http://metrics-store:8080/prometheus`.
 
 ## Related Services
 
